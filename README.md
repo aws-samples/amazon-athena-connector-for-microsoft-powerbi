@@ -1,11 +1,6 @@
-## My Project
+## Creating awesome dashboards quickly on Microsoft Power BI using Amazon Athena
 
-TODO: Fill this README out!
-
-Be sure to:
-
-* Change the title in this README
-* Edit your repository description on GitHub
+This repository contains the Cloudformation template to deploy the dependencies for the blog post: "Creating awesome dashboards quickly on Microsoft Power BI using Amazon Athena".
 
 ## License
 
