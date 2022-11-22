@@ -1,0 +1,1308 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloudformation stack for Athena PowerBI Automation blog post
+
+Parameters:
+  KeyName:
+    Description: The name of your key pair.
+    Type: AWS::EC2::KeyPair::KeyName
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: '/aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base'
+
+  PowerBIGatewayName:
+    Description: Name of the Microsoft Power BI Gateway that you will install in the EC2
+    Type: String
+
+  PowerBITechnicalAccountUsername:
+    Description: Username of the admin technical account onthe PowerBI Gateway. It can not have MFA
+    Type: String
+
+  PowerBITechnicalAccountPassword:
+    Description: Password of the admin technical account on the PowerBI Gateway. It can not have MFA
+    NoEcho: true
+    Type: String
+
+Resources:
+  PowerBiVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref PowerBiVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PowerBiVPC
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PowerBiVPC
+      AvailabilityZone:
+        !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: 10.0.0.0/28
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  PublicSubnetAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref PowerBiVPC
+      AvailabilityZone:
+        !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: 10.0.0.48/28
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref PowerBiVPC
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+
+  AthenaEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref PowerBiOutAccess
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.athena
+      SubnetIds:
+        - !Ref PrivateSubnet
+      VpcEndpointType: Interface
+      VpcId: !Ref PowerBiVPC
+
+  SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref PowerBiOutAccess
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      SubnetIds:
+        - !Ref PrivateSubnet
+      VpcEndpointType: Interface
+      VpcId: !Ref PowerBiVPC
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref PowerBiOutAccess
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      SubnetIds:
+        - !Ref PrivateSubnet
+      VpcEndpointType: Interface
+      VpcId: !Ref PowerBiVPC
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+        - !Ref PublicRouteTable
+      VpcEndpointType: Gateway
+      VpcId: !Ref PowerBiVPC
+
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+        - !Ref PublicRouteTable
+      VpcEndpointType: Gateway
+      VpcId: !Ref PowerBiVPC
+
+  AthenaOutputS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketName: !Sub 'aws-athena-pbi-query-results-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  PowerBiDataProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "athena.amazonaws.com"
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+          - Effect: "Allow"
+            Principal:
+              AWS:
+                !GetAtt PowerBiGatewayRole.Arn
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref SSMPowerBIAthenaBlog
+        - !Ref AthenaPowerBIAthenaBlog
+        - !Ref S3TaxiPowerBIAthenaBlog
+        - !Ref S3QueryResultPowerBIAthenaBlog
+        - !Ref GluePowerBIAthenaBlog
+
+  PowerBiGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - !Ref BaseOperationsPowerBIGatewayAthenaBlog
+        - !Ref PowerBIRefreshCredentialsAthenaBlog
+
+  AthenaPowerBIAthenaBlog:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to perform Amazon Athena operations on the Amazon Athena Power BI blog post
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "athena:GetWorkGroup"
+              - "athena:StartQueryExecution"
+              - "athena:StopQueryExecution"
+              - "athena:GetQueryExecution"
+              - "athena:GetQueryResults"
+              - "athena:GetQueryResultsStream"
+            Resource:
+              - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/athena-powerbi-aws-blog"
+              - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:datacatalog/nyctaxi"
+
+  S3TaxiPowerBIAthenaBlog:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to perform S3 operations on the input of the Amazon Athena Power BI blog post
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "s3:GetObjectAcl"
+              - "s3:GetObject"
+              - "s3:ListBucket"
+            Resource:
+              - "arn:aws:s3:::serverless-analytics"
+              - "arn:aws:s3:::serverless-analytics/canonical/NY-Pub/year=2015/*"
+
+  S3QueryResultPowerBIAthenaBlog:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to perform S3 operations on the output of the Amazon Athena Power BI blog post
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "s3:GetBucketLocation"
+              - "s3:GetObject"
+              - "s3:ListBucket"
+              - "s3:ListBucketMultipartUploads"
+              - "s3:ListMultipartUploadParts"
+              - "s3:AbortMultipartUpload"
+              - "s3:PutObject"
+            Resource:
+              - "arn:aws:s3:::aws-athena-pbi-query-results-*"
+
+  GluePowerBIAthenaBlog:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to perform AWS Glue operations on the output of the Amazon Athena Power BI blog post
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "glue:GetCatalogImportStatus"
+              - "glue:GetPartition"
+              - "glue:GetTables"
+              - "glue:GetPartitions"
+              - "glue:GetDatabases"
+              - "glue:GetDatabase"
+              - "glue:GetTable"
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/nyctaxi"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/nyctaxi/records"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+
+  SSMPowerBIAthenaBlog:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to perform SSM operations on the Amazon Athena Power BI blog post
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "ssm:UpdateInstanceInformation"
+              - "ssmmessages:CreateControlChannel"
+              - "ssmmessages:CreateDataChannel"
+              - "ssmmessages:OpenControlChannel"
+              - "ssmmessages:OpenDataChannel"
+            Resource:
+              - "*"
+
+  BaseOperationsPowerBIGatewayAthenaBlog:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to perform EC2 Describes, read SSM parameters and read Secrets on the Amazon Athena Power BI blog post
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "ec2:DescribeTags"
+              - "ec2:DescribeInstances"
+            Resource:
+              - "*"
+          - Effect: "Allow"
+            Action:
+              - "ssm:GetParameter"
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/PowerBI/Script/*"
+          - Effect: "Allow"
+            Action:
+              - "secretsmanager:GetSecretValue"
+            Resource:
+              - !Ref PowerBIGatewayAdminSecret
+          - Effect: "Allow"
+            Action:
+              - "sts:AssumeRole"
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}*"
+
+  PowerBIRefreshCredentialsAthenaBlog:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to perform DynamoDB scan and STS assume role on the Power BI Gateway for the Amazon Athena Power BI blog post
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "dynamodb:Scan"
+            Resource:
+              - !GetAtt DSNDynamoTable.Arn
+          - Effect: "Allow"
+            Action:
+              - "sts:AssumeRole"
+            Resource:
+              - "*"
+
+  PowerBiGatewayProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref PowerBiGatewayRole
+
+  PowerBiDataProjectProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref PowerBiDataProjectRole
+
+  PowerBiGateway:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3a.2xlarge
+      IamInstanceProfile: !Ref PowerBiGatewayProfile
+      SubnetId: !Ref PrivateSubnet
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !Ref PowerBiOutAccess
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+            cd C:\Users\Administrator\Desktop
+            # Disable IE Enhanced Security Configuration
+            $AdminKey = “HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}”
+            Set-ItemProperty -Path $AdminKey -Name “IsInstalled” -Value 0
+            Stop-Process -Name Explorer
+            # Add PowerShell modules
+            Register-PackageSource -Name MyNuGet -Location https://www.nuget.org/api/v2 -ProviderName NuGet -Force -Verbose
+            Install-Package -Name Microsoft.PowerBi.Api -ProviderName NuGet -Scope AllUsers -RequiredVersion 4.2.1 -SkipDependencies -Destination C:\Windows\system32\ -Force
+            Install-Package -Name Microsoft.Rest.ClientRuntime -ProviderName NuGet -Scope AllUsers -RequiredVersion 2.3.22 -SkipDependencies -Destination C:\Windows\system32\ -Force
+            Install-Package -Name Newtonsoft.Json -ProviderName NuGet -Scope AllUsers -RequiredVersion 11.0.2 -SkipDependencies -Destination C:\Windows\system32\ -Force
+            Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope AllUsers
+            $content = Get-SSMParameter -Name /PowerBI/Script/Login -Select 'Parameter.Value' | out-file -filepath C:\Users\Administrator\Desktop\Login.ps1 -encoding ascii
+            $content = Get-SSMParameter -Name /PowerBI/Script/CreateDSN -Select 'Parameter.Value' | out-file -filepath C:\Users\Administrator\Desktop\CreateDSN.ps1 -encoding ascii
+            $content = Get-SSMParameter -Name /PowerBI/Script/DeleteDSN -Select 'Parameter.Value' | out-file -filepath C:\Users\Administrator\Desktop\DeleteDSN.ps1 -encoding ascii
+            $content = Get-SSMParameter -Name /PowerBI/Script/AddUser -Select 'Parameter.Value' | out-file -filepath C:\Users\Administrator\Desktop\AddUser.ps1 -encoding ascii
+            $content = Get-SSMParameter -Name /PowerBI/Script/DeleteUser -Select 'Parameter.Value' | out-file -filepath C:\Users\Administrator\Desktop\DeleteUser.ps1 -encoding ascii
+          </powershell>
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+        - Key: Name
+          Value: Power BI Data Gateway
+        - Key: PowerBIGatewayName
+          Value: !Ref PowerBIGatewayName
+
+  PowerBiDesktop:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3a.2xlarge
+      IamInstanceProfile: !Ref PowerBiDataProjectProfile
+      SubnetId: !Ref PrivateSubnet
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !Ref PowerBiOutAccess
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+            cd C:\Users\Administrator\Desktop
+            New-Item -Path "C:\Users\Administrator\Documents\Power BI Desktop\Custom Connectors" -ItemType "directory"
+            $content = 'Add-OdbcDsn -DriverName "Simba Athena ODBC Driver" -DsnType "System" -Platform "64-bit" -Name "taxiconnection" -SetPropertyValue @("Description=taxiconnection" , "AWSRegion=${AWS::Region}" , "Workgroup=athena-powerbi-aws-blog" , "S3OutputLocation=s3://aws-athena-pbi-query-results-${AWS::AccountId}-${AWS::Region}", "S3OutputEncOption=SSE_S3", "AuthenticationType=Instance Profile")' | out-file -filepath C:\Users\Administrator\Desktop\ConfigureODBC.ps1
+            # Disable IE Enhanced Security Configuration
+            $AdminKey = “HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}”
+            Set-ItemProperty -Path $AdminKey -Name “IsInstalled” -Value 0
+            Stop-Process -Name Explorer
+          </powershell>
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+        - Key: Name
+          Value: Power BI Desktop
+
+  PowerBiOutAccess:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: PowerBiSG
+      GroupDescription: This security group allows outbound access to the ec2 instances
+      VpcId: !Ref PowerBiVPC
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  SGSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref PowerBiOutAccess
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !GetAtt PowerBiOutAccess.GroupId
+
+  TaxiDB:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Description: New York City Taxi and Limousine Commission (TLC) Trip Record Data database
+        Name: nyctaxi
+
+  TaxiTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref TaxiDB
+      TableInput:
+        Name: records
+        StorageDescriptor:
+          Columns:
+            - Name: vendorid
+              Type: string
+            - Name: pickup_datetime
+              Type: timestamp
+            - Name: dropoff_datetime
+              Type: timestamp
+            - Name: ratecode
+              Type: int
+            - Name: passenger_count
+              Type: int
+            - Name: trip_distance
+              Type: double
+            - Name: fare_amount
+              Type: double
+            - Name: total_amount
+              Type: double
+            - Name: payment_type
+              Type: int
+          Location: "s3://serverless-analytics/canonical/NY-Pub/year=2015"
+          InputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+          OutputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+          SerdeInfo:
+            SerializationLibrary: 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
+            Parameters: { "serialization.format": "1" }
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: month
+            Type: string
+          - Name: type
+            Type: string
+
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: athena-powerbi-aws-blog
+      Description: WorkGroup used on the Athena PowerBi blog post
+      RecursiveDeleteOption: true
+      State: ENABLED
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        ResultConfiguration:
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+          OutputLocation: !Sub s3://aws-athena-pbi-query-results-${AWS::AccountId}-${AWS::Region}
+
+  CreatePartitionsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}_athena_powerbi_blog_partitions_creator"
+      Description: Creates Partitions on New York City Taxi and Limousine Commission (TLC) Trip Record Data database
+      Runtime: python3.7
+      Timeout: 300
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt [ CreatePartitionsFunctionRole, Arn ]
+      Code:
+        ZipFile: !Sub |
+          import cfnresponse
+          import boto3
+          import logging
+          import os
+          from botocore.exceptions import ClientError
+
+          logging.basicConfig(level=os.environ.get('LOGLEVEL', 'INFO'))
+
+          logger = logging.getLogger()
+          REGION = os.getenv('region')
+
+          ATHENA_CLIENT = boto3.client('athena', region_name=REGION)
+
+          def handler(event, context):
+
+            try:
+              response = ATHENA_CLIENT.start_query_execution(
+                QueryString='MSCK REPAIR TABLE records',
+                QueryExecutionContext={
+                    'Database': 'nyctaxi'
+                },
+                WorkGroup='athena-powerbi-aws-blog'
+              )
+              logger.info(f"Created partitions successfully: {response}")
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, {})
+            except Exception as e:
+                logger.error('Failed to create partititions due to %s', e)
+                cfnresponse.send(event, context, cfnresponse.FAILED, {}, {})
+            return {"statusCode": 200, "response": True}
+      Environment:
+        Variables:
+          region: !Sub ${AWS::Region}
+          workgroup: athena-powerbi-aws-blog
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  CreatePartitionsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - !Ref CreatePartitionsFunctionPolicy
+
+  CreatePartitionsFunctionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to create partitions to be used on the Amazon Athena Power BI blog post
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}_athena_powerbi_blog_partitions_creator'
+          - Effect: "Allow"
+            Action:
+              - "s3:GetBucketLocation"
+              - "s3:GetObject"
+              - "s3:ListBucket"
+              - "s3:ListBucketMultipartUploads"
+              - "s3:ListMultipartUploadParts"
+              - "s3:AbortMultipartUpload"
+              - "s3:PutObject"
+            Resource:
+              - "arn:aws:s3:::aws-athena-pbi-query-results-*"
+          - Effect: "Allow"
+            Action:
+              - "s3:ListBucket"
+            Resource:
+              - "arn:aws:s3:::serverless-analytics"
+          - Effect: Allow
+            Action:
+              - "athena:GetWorkGroup"
+              - "athena:StartQueryExecution"
+              - "athena:StopQueryExecution"
+              - "athena:GetQueryExecution"
+              - "athena:GetQueryResults"
+              - "athena:GetQueryResultsStream"
+            Resource:
+              - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/athena-powerbi-aws-blog"
+              - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:datacatalog/nyctaxi"
+          - Effect: "Allow"
+            Action:
+              - "glue:BatchCreatePartition"
+              - "glue:GetCatalogImportStatus"
+              - "glue:GetPartition"
+              - "glue:GetTables"
+              - "glue:GetPartitions"
+              - "glue:GetDatabases"
+              - "glue:GetDatabase"
+              - "glue:GetTable"
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/nyctaxi"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/nyctaxi/records"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+
+  PartitionsCreator:
+    Type: Custom::PartitionsCreator
+    DependsOn:
+      - AthenaEndpoint
+      - AthenaWorkGroup
+      - TaxiTable
+      - TaxiDB
+    Properties:
+      ServiceToken: !GetAtt CreatePartitionsFunction.Arn
+
+  PowerBIGatewayAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: PowerBITechnicalAccount
+      Description: This secret has the username and password from the admin technical account on the PowerBI Gateway
+      SecretString:
+        !Join
+        - ""
+        - - '{"username":"'
+          - !Ref PowerBITechnicalAccountUsername
+          - '", "password":"'
+          - !Ref PowerBITechnicalAccountPassword
+          - '"}'
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  SetupNewDSNDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Name: 'CreateNewDSN'
+      Content:
+        schemaVersion: '2.2'
+        description: 'AddODBCDriverV1'
+        parameters:
+          DSN:
+            type: String
+            description: DATA SOURCE NAME (DSN)
+          AWSRegion:
+            type: String
+            description: AWS REGION
+          Workgroup:
+            type: String
+            description: ATHENA WORK GROUP
+          S3OutputLocation:
+            type: String
+            description: S3 OUTPUT LOCATION
+          S3OutputEncOption:
+            type: String
+            description: OUTPUT ENCRYPTION OPTIONS
+          AuthenticationType:
+            type: String
+            description: AUTHENTICATION TYPE
+          AWSProfile:
+            type: String
+            description: AWS Profile
+          Users:
+            type: String
+            description: A list of users (separated by comma) that are allowed to read from that
+
+        mainSteps:
+
+          - action: 'aws:runPowerShellScript'
+            precondition:
+              StringEquals:
+                - platformType
+                - Windows
+            name: 'AddODBCDriverV1'
+            inputs:
+              runCommand:
+                - ' $ErrorActionPreference = "Stop" '
+                - $Credentials = (Use-STSRole -Region eu-west-1 -RoleArn {{AWSProfile}}  -RoleSessionName project).Credentials
+                - Set-AWSCredentials -AccessKey $Credentials.AccessKeyId -SecretKey $Credentials.SecretAccessKey -SessionToken $Credentials.SessionToken  -StoreAs {{AWSProfile}} -ProfileLocation C:\Windows\ServiceProfiles\PBIEgwService\.aws\credentials
+                - Set-AWSCredentials -AccessKey $Credentials.AccessKeyId -SecretKey $Credentials.SecretAccessKey -SessionToken $Credentials.SessionToken  -StoreAs {{AWSProfile}} -ProfileLocation C:\Users\Administrator\.aws\credentials
+                - Add-OdbcDsn -DriverName "Simba Athena ODBC Driver" -DsnType "System" -Platform "64-bit" -Name "{{DSN}}" -SetPropertyValue @("Description={{DSN}}", "AWSRegion={{AWSRegion}}", "Workgroup={{Workgroup}}", "S3OutputLocation={{S3OutputLocation}}", "S3OutputEncOption={{S3OutputEncOption}}", "AuthenticationType={{AuthenticationType}}", "AWSProfile={{AWSProfile}}")
+                - 'C:\Users\Administrator\Desktop\Login.ps1'
+                - 'C:\Users\Administrator\Desktop\CreateDSN.ps1 "{{DSN}}" {{Users}}'
+
+  RemoveDSNDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Name: 'DeleteDSN'
+      Content:
+        schemaVersion: '2.2'
+        description: 'DeleteODBCDriverV1'
+        parameters:
+          DSN:
+            type: String
+            description: DATA SOURCE NAME (DSN)
+          AWSProfile:
+            type: String
+            description: AWS Profile
+        mainSteps:
+          - action: 'aws:runPowerShellScript'
+            precondition:
+              StringEquals:
+                - platformType
+                - Windows
+            name: 'DeleteDSN'
+            inputs:
+              runCommand:
+                - ' $ErrorActionPreference = "Stop" '
+                - Remove-OdbcDsn -Name "{{DSN}}" -DsnType "System" -Platform "64-bit"
+                - 'C:\Users\Administrator\Desktop\Login.ps1'
+                - 'C:\Users\Administrator\Desktop\DeleteDSN.ps1 "{{DSN}}"'
+
+  RefreshGatewayCredentialsDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Name: 'RefreshGatewayCredentials'
+      Content:
+        schemaVersion: '2.2'
+        description: 'RefreshGatewayCredentials'
+
+        mainSteps:
+          - action: 'aws:runPowerShellScript'
+            precondition:
+              StringEquals:
+                - platformType
+                - Windows
+            name: 'RefreshGatewayCredentials'
+            inputs:
+              runCommand:
+                - ' $ErrorActionPreference = "Stop" '
+                - Add-Type -Path (${env:ProgramFiles(x86)}+"\AWS SDK for .NET\bin\Net45\AWSSDK.DynamoDBv2.dll")
+                - $dbClient = New-Object Amazon.DynamoDBv2.AmazonDynamoDBClient
+                - $request = New-Object Amazon.DynamoDBv2.Model.ScanRequest("PowerbiBlogTable")
+                - $dataSources = $dbClient.Scan($request).Items
+                - |
+                  ForEach ($D in $dataSources) {
+                    try {
+                        $Credentials = (Use-STSRole -Region eu-west-1 -RoleArn $D.AWSProfile.S  -RoleSessionName project).Credentials
+                        Set-AWSCredentials -AccessKey $Credentials.AccessKeyId -SecretKey $Credentials.SecretAccessKey -SessionToken $Credentials.SessionToken  -StoreAs $D.AWSProfile.S -ProfileLocation C:\Users\Administrator\.aws\credentials
+                        Set-AWSCredentials -AccessKey $Credentials.AccessKeyId -SecretKey $Credentials.SecretAccessKey -SessionToken $Credentials.SessionToken  -StoreAs $D.AWSProfile.S -ProfileLocation C:\Windows\ServiceProfiles\PBIEgwService\.aws\credentials
+                    }
+                    Catch {
+                        Write-Host $D.Name.S
+                        Continue
+                    }
+                  }
+
+  LoginScript:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: '/PowerBI/Script/Login'
+      Type: String
+      Value: '
+              $User = (Get-SECSecretValue -SecretId "PowerBITechnicalAccount" -Select SecretString | ConvertFrom-Json).username;
+              $PW = (Get-SECSecretValue -SecretId "PowerBITechnicalAccount" -Select SecretString | ConvertFrom-Json).password;
+              $SecPasswd = ConvertTo-SecureString $PW -AsPlainText -Force;
+              $myCred = New-Object System.Management.Automation.PSCredential($User,$SecPasswd);
+              Connect-PowerBIServiceAccount -Credential $myCred
+              '
+
+  CreateDSNScript:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: '/PowerBI/Script/CreateDSN'
+      Type: String
+      Value: '$DSN=$args[0];
+              $Users=$args[1];
+
+
+               $pbipath = Resolve-Path "C:\Windows\system32\Microsoft.PowerBI.Api.4.2.1\lib\net48\Microsoft.PowerBI.Api.dll"
+
+
+              [System.Reflection.Assembly]::LoadFrom($pbipath)
+
+
+              $nwpath = Resolve-Path "C:\Windows\system32\Newtonsoft.Json.11.0.2\lib\netstandard2.0\Newtonsoft.Json.dll"
+
+
+              [System.Reflection.Assembly]::LoadFrom($nwpath)
+
+
+              $crpath = Resolve-Path "C:\Windows\system32\Microsoft.Rest.ClientRuntime.2.3.22\lib\netstandard2.0\Microsoft.Rest.ClientRuntime.dll"
+
+
+              [System.Reflection.Assembly]::LoadFrom($crpath)
+
+
+              # Get the  gateway id
+
+
+              $Response = Invoke-PowerBIRestMethod -Url "gateways" -Method Get | ConvertFrom-Json;
+              $Gateways = $Response.value;
+
+
+              $instanceid = (curl http://169.254.169.254/latest/meta-data/instance-id -UseBasicParsing ).Content;
+              $Name =(Get-EC2Instance -InstanceId $instanceid).Instances.tags |  Where-Object {$_.Key -eq "PowerBIGatewayName"} | Select-Object  -Property Value;
+              $Name = $Name.Value;
+              $Gid = $Gateways |  Where-Object {$_.Name -eq "$Name"} | Select-Object  -Property id;
+              $modulus = ($Gateways |  Where-Object {$_.Name -eq "$Name"} | Select-Object  -Property publicKey).publicKey.modulus;
+
+
+              # Input gateway public key object (retrieved from Get Gateway or Get Gateways API).
+
+
+              $gatewayPublicKey = @{
+
+
+                  exponent = "AQAB";
+
+
+                  modulus  = $modulus;
+
+
+              }
+
+
+              # Create the objects to perform the necessary encryption on the credentials.
+
+
+              $gatewayKeyObj = [Microsoft.PowerBI.Api.Models.GatewayPublicKey]::new($gatewayPublicKey.exponent, $gatewayPublicKey.modulus);
+              $anonymousCreds = [Microsoft.PowerBI.Api.Models.Credentials.AnonymousCredentials]::new();
+              $credentialsEncryptor = [Microsoft.PowerBI.Api.Extensions.AsymmetricKeyEncryptor]::new($gatewayKeyObj);
+              $credentialDetailsAnonymous = [Microsoft.PowerBI.Api.Models.CredentialDetails]::new($anonymousCreds, [Microsoft.PowerBI.Api.Models.PrivacyLevel]::Private, [Microsoft.PowerBI.Api.Models.EncryptedConnection]::Encrypted, $credentialsEncryptor);
+
+
+              $Body = @{
+
+
+                    dataSourceType= "Extension";
+
+
+                    connectionDetails= "{""extensionDataSourceKind"":""AmazonAthena"",""extensionDataSourcePath"":""$DSN""}";
+
+
+                    datasourceName = "$DSN";
+
+
+                    credentialDetails = @{
+
+
+                      credentialType      = "Anonymous";
+
+
+                      credentials         = $credentialDetailsAnonymous.Credentials;
+
+
+                      encryptedConnection = "Encrypted";
+
+
+                      privacyLevel        = "Private";
+
+
+                      encryptionAlgorithm = "RSA-OAEP";
+
+
+                  }
+
+
+              } | ConvertTo-Json
+
+
+              #create datasources
+
+
+              $Response = Invoke-PowerBIRestMethod -Url "gateways/$($Gid.id)/datasources" -Body $Body -Method Post | ConvertFrom-Json
+
+
+              $Response.id
+
+
+              ForEach ($user in $Users) {
+
+
+                  try{C:\Users\Administrator\Desktop\AddUser.ps1 $user $($Gid.id)  $Response.id }
+
+
+                  catch {
+
+
+                      Write-Host $user
+
+
+                      Continue }
+
+
+              }'
+
+  DeleteDSNScript:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: '/PowerBI/Script/DeleteDSN'
+      Type: String
+      Value: '$DSN=$args[0]
+
+
+              # Get the  gateway id
+
+
+              $Response = Invoke-PowerBIRestMethod -Url "gateways" -Method Get | ConvertFrom-Json;
+              $Gateways = $Response.value;
+
+
+              # get gateway id
+
+
+              $instanceid = (curl http://169.254.169.254/latest/meta-data/instance-id -UseBasicParsing ).Content;
+              $Name =(Get-EC2Instance -InstanceId $instanceid).Instances.tags |  Where-Object {$_.Key -eq "PowerBIGatewayName"} | Select-Object  -Property Value;
+              $Name = $Name.Value; $Gid = $Gateways |  Where-Object {$_.Name -eq "$Name"} | Select-Object  -Property id;
+
+
+              #List datasource
+
+
+              $datasources = Invoke-PowerBIRestMethod -Url "gateways/$($Gid.id)/datasources"  -Method get | ConvertFrom-Json;
+
+
+              #Parse result
+
+
+              $datasources = $datasources.value;
+
+
+              # Get DSN ID
+
+
+              $id = $datasources |  Where-Object {$_.datasourceName -eq "$DSN"} | Select-Object  -Property id;
+
+
+              # Delete datasource
+
+
+              Invoke-PowerBIRestMethod -Url "gateways/$($Gid.id)/datasources/$($id.id)" -Method delete;
+            '
+
+  AddUserScript:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: '/PowerBI/Script/AddUser'
+      Type: String
+      Value: '#users to add to a group
+
+
+              $User=$args[0];
+              $Gtw=$args[1];
+              $Id=$args[2];
+
+
+              $Body = @{
+
+
+                  emailAddress          = "$User"
+
+
+                  datasourceAccessRight = "Read"
+
+
+              } | ConvertTo-Json
+
+
+              #Add a user to a group
+
+
+              Invoke-PowerBIRestMethod -Url "gateways/$Gtw/datasources/$Id/users"  -Body $Body -Method Post
+              '
+
+  AddMemberGroupScript:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: '/PowerBI/Script/DeleteUser'
+      Type: String
+      Value: '
+              #users to delete a group
+
+
+              $User=$args[0];
+              $Gtw=$args[1];
+              $Id=$args[2];
+
+
+              #Delete a user to a group
+
+
+              Invoke-PowerBIRestMethod -Url "gateways/$Gtw/datasources/$Id/users/$User"  -Method delete
+              '
+
+  DSNDynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: PowerbiBlogTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "Name"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "Name"
+          KeyType: "HASH"
+      SSESpecification:
+        SSEEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: tag-name
+          Value: tag-value
+
+  DSNStreamMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt DSNDynamoTable.StreamArn
+      FunctionName: !GetAtt DynamoStreamFunction.Arn
+      MaximumBatchingWindowInSeconds: 10
+      MaximumRetryAttempts: 3
+      StartingPosition: TRIM_HORIZON
+
+  DynamoStreamLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaDynamoDBExecutionRole
+        - !Ref LambdaSendCommandPolicy
+
+  LambdaSendCommandPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Allows Lambda to run SSM documents
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "ssm:SendCommand"
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${SetupNewDSNDocument}"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${RemoveDSNDocument}"
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${PowerBiGateway}"
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${PowerBiDesktop}"
+
+  DynamoStreamFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}_athena_powerbi_blog_stream_processor"
+      Description: Handle changes in the DSN dynamo table and creates DSN entries in the gateway
+      Runtime: python3.9
+      Timeout: 300
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt [ DynamoStreamLambdaRole, Arn ]
+      Code:
+        ZipFile: !Sub |
+          import boto3
+
+          ssm_client = boto3.client("ssm")
+
+
+          class DataSource:
+              def __init__(
+                  self,
+                  name: str,
+                  aws_profile: str,
+                  aws_region=None,
+                  workgroup=None,
+                  s3_output_location=None,
+                  encryption_options=None,
+                  authentication_type=None,
+                  users=None,
+              ) -> None:
+                  self.name = name
+                  self.aws_profile = aws_profile
+                  self.aws_region = aws_region
+                  self.workgroup = workgroup
+                  self.s3_output_location = s3_output_location
+                  self.encryption_options = encryption_options
+                  self.authentication_type = authentication_type
+                  self.users = users
+
+
+          def handler(event: dict, context: dict):
+              # deleted_dsn = None
+              # new_dns = None
+              for record in event["Records"]:
+                  event_type = record["eventName"]
+                  new_record, old_record = parse_record(record)
+                  deleted_dsn = None
+                  new_dns = None
+                  if (
+                      event_type == "REMOVE" or event_type == "MODIFY"
+                  ) and old_record is not None:
+                      deleted_dsn = delete_dsn(old_record)
+                  if (
+                      event_type == "INSERT" or event_type == "MODIFY"
+                  ) and new_record is not None:
+                      new_dns = create_dsn(new_record)
+                  print(deleted_dsn, new_dns)
+              return {"message": "Success!"}
+
+
+          def parse_record(record: dict) -> tuple[DataSource, DataSource]:
+              old_record = None
+              new_record = None
+              if "NewImage" in record["dynamodb"]:
+                  data = record["dynamodb"]["NewImage"]
+                  new_record = DataSource(
+                      data["Name"]["S"],
+                      data["AWSProfile"]["S"],
+                      data["AWSRegion"]["S"],
+                      data["Workgroup"]["S"],
+                      data["S3OutputLocation"]["S"],
+                      data["S3OutputEncOption"]["S"],
+                      data["AuthenticationType"]["S"],
+                      data["Users"]["S"],
+                  )
+              if "OldImage" in record["dynamodb"]:
+                  data = record["dynamodb"]["OldImage"]
+                  old_record = DataSource(
+                      data["Name"]["S"],
+                      data["AWSProfile"]["S"],
+                  )
+              return new_record, old_record
+
+
+          def create_dsn(data_source: DataSource):
+              return __send_ssm_commnand(
+                  "CreateNewDSN",
+                  {
+                      "DSN": [data_source.name],
+                      "AWSProfile": [data_source.aws_profile],
+                      "AWSRegion": [data_source.aws_region],
+                      "Workgroup": [data_source.workgroup],
+                      "S3OutputLocation": [data_source.s3_output_location],
+                      "S3OutputEncOption": [data_source.encryption_options],
+                      "AuthenticationType": [data_source.authentication_type],
+                      "Users": [data_source.users],
+                  },
+              )
+
+
+          def delete_dsn(data_source: DataSource):
+              return __send_ssm_commnand(
+                  "DeleteDSN",
+                  {
+                      "DSN": [data_source.name],
+                      "AWSProfile": [data_source.aws_profile],
+                  },
+              )
+
+
+          def __send_ssm_commnand(command: str, parameters: dict):
+              return ssm_client.send_command(
+                  Targets=[
+                      {
+                          "Key": "tag:Name",
+                          # "Key": "tag-key",
+                          "Values": [
+                              "Power BI Data Gateway",
+                          ],
+                      },
+                  ],
+                  DocumentName=command,
+                  # DocumentVersion='$LATEST',
+                  Comment="string",
+                  TimeoutSeconds=30,
+                  Parameters=parameters,
+                  MaxConcurrency="50",
+                  MaxErrors="0",
+                  CloudWatchOutputConfig={
+                      "CloudWatchOutputEnabled": True,
+                  },
+              )
+      Environment:
+        Variables:
+          region: !Sub ${AWS::Region}
+          workgroup: athena-powerbi-aws-blog
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: aws-blog
+          Value: athena-powerbi
+
+  PowerBIRefreshCredentialsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref PowerBIRefreshCredentialsPolicy
+
+  PowerBIRefreshCredentialsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Provides access to execute the SSM document to refresh Power BI credentials
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "ssm:SendCommand"
+            Resource:
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${PowerBiGateway}"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${RefreshGatewayCredentialsDocument}"
+
+  RefreshCredentialsScheduledEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: powerbi-gateway-refresh-credentials-rule
+      ScheduleExpression: rate(50 minutes)
+      State: ENABLED
+      Targets:
+        - Id: Target0
+          Arn: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${RefreshGatewayCredentialsDocument}"
+          Input: "{}"
+          RoleArn: !GetAtt PowerBIRefreshCredentialsRole.Arn
+          RunCommandParameters:
+            RunCommandTargets:
+              - Key: InstanceIds
+                Values:
+                  - !Ref PowerBiGateway
+
+Outputs:
+  DataProjectRoleArn:
+    Description: This role allows to execute Amazon Athena queries on top of the Taxi NYC dataset
+    Value:
+      !GetAtt PowerBiDataProjectRole.Arn
+
+  AthenaOutputS3Bucket:
+    Description: This is the Amazon S3 output Bucket for Amazon Athena
+    Value:
+      !Sub 's3://aws-athena-pbi-query-results-${AWS::AccountId}-${AWS::Region}'
+
+  AWSRegion:
+    Description: This is the region where the CloudFormation was deployed
+    Value:
+      !Sub '${AWS::Region}'
