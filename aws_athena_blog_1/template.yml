@@ -412,7 +412,7 @@ Resources:
     Properties:
       FunctionName: !Sub "${AWS::StackName}_athena_powerbi_blog_partitions_creator"
       Description: Creates Partitions on New York City Taxi and Limousine Commission (TLC) Trip Record Data database
-      Runtime: python3.7
+      Runtime: python3.10
       Timeout: 300
       Handler: index.handler
       MemorySize: 128
